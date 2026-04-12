@@ -13,7 +13,7 @@ func main() {
 		port = "8080"
 	}
 
-	api := NewWeDispatcherAPI(port)
+	api := NewDispatcherAPI(port)
 
 	if err := api.Serve(); err != nil && err != http.ErrServerClosed {
 		slog.Error("error starting api server at", "port", port)

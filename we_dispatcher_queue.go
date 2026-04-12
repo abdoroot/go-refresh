@@ -80,7 +80,7 @@ type DispatcherAPI struct {
 	wg     sync.WaitGroup
 }
 
-func NewWeDispatcherAPI(Addr string) *DispatcherAPI {
+func NewDispatcherAPI(Addr string) *DispatcherAPI {
 	if !strings.HasPrefix(Addr, ":") {
 		Addr = fmt.Sprintf(":%v", Addr)
 	}
