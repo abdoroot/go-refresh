@@ -52,15 +52,15 @@ func (r CreateDispatchRequest) validate() error {
 		return fmt.Errorf("channel should be whatsapp or email only")
 	}
 
-	if r.Channel == channelEmail && !strings.Contains(r.Recipient, "@") {
+	if r.Channel == channelEmail && !isEmailValid(r.Recipient) {
 		return fmt.Errorf("please enter valid recipient")
 	}
 
-	if r.Channel == channelWhatsapp && len(r.Recipient) < 6 {
+	if r.Channel == channelWhatsapp && !isMobileNumValid(r.Recipient) {
 		return fmt.Errorf("please enter valid recipient")
 	}
 
-	if len(r.Message) == 0 {
+	if !isMesssageValid(r.Message) {
 		return fmt.Errorf("please enter valid message")
 	}
 
@@ -80,15 +80,31 @@ func (r CreateBulkDispatchRequest) validate() error {
 
 	if len(r.Recipients) == 0 {
 		return fmt.Errorf("recipients should not be empty")
+	} else {
+		switch r.Channel {
+		case channelWhatsapp:
+			for _, m := range r.Recipients {
+				if !isMobileNumValid(m) {
+					return fmt.Errorf("recipients mobile % not valid", m)
+				}
+			}
+		case channelEmail:
+			for _, e := range r.Recipients {
+				if !isEmailValid(e) {
+					return fmt.Errorf("recipients emobil% not valid", e)
+				}
+			}
+		default:
+			return fmt.Errorf("unkonw recipients type")
+		}
 	}
 
-	if len(r.Message) == 0 {
+	if isMesssageValid(r.Message) {
 		return fmt.Errorf("please enter valid message")
 	}
 
 	return nil
 }
-
 
 type dispatchResp struct {
 	Message string `json:"message"`
@@ -406,11 +422,14 @@ func (a *DispatcherAPI) getJobIndex(id int) (int, bool) {
 	return 0, false
 }
 
-
 func isEmailValid(email string) bool {
-	return strings.Contains(email,"@")
+	return strings.Contains(email, "@")
 }
 
 func isMobileNumValid(mobile string) bool {
-	return len(mobile) > 0 && strings.Contains("+")
+	return len(mobile) > 0 && strings.Contains(mobile, "+")
+}
+
+func isMesssageValid(message string) bool {
+	return len(message) > 0
 }
