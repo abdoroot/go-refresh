@@ -202,13 +202,21 @@ func (a *DispatcherAPI) dispatchHandler(w http.ResponseWriter, r *http.Request) 
 
 func (a *DispatcherAPI) bulkDispatchHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		err, j := a.handleCreateBulkJobs(r.Body)
+		err, jobs := a.handleCreateBulkJobs(r.Body)
 		if err != nil {
 			a.logger.Error("bulk job creation", "error", err)
 			a.writeJSON(w, dispatchResp{"bad request"}, http.StatusBadRequest)
 			return
 		}
-		a.writeJSON(w, j, http.StatusCreated)
+		a.writeJSON(w,
+			struct {
+				Count int           `json:"count"`
+				Jobs  []DispatchJob `json:"jobs"`
+			}{
+				Count: len(jobs),
+				Jobs:  jobs,
+			},
+			http.StatusCreated)
 	} else {
 		a.writeJSON(w, dispatchResp{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
@@ -235,33 +243,38 @@ func (a *DispatcherAPI) handleRetrieveJobs() []DispatchJob {
 	return dist
 }
 
-func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, DispatchJob) {
+func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, []DispatchJob) {
 	req := &CreateBulkDispatchRequest{}
 	if err := json.NewDecoder(r).Decode(req); err != nil {
-		return err, DispatchJob{}
+		return err, nil
 	}
 
 	if err := req.validate(); err != nil {
-		return err, DispatchJob{}
+		return err, nil
 	}
 
 	a.mu.Lock()
+	jobs := []DispatchJob{}
+
 	jobID := a.getNewJobID()
-	j := DispatchJob{
-		ID:          jobID,
-		Channel:     req.Channel,
-		Recipient:   req.Recipient,
-		Message:     req.Message,
-		Status:      dispatchStatusQueued,
-		MaxAttempts: dispatchMaxJobRetryAttempts,
-		CreatedAt:   time.Now(),
+	for i, re := range req.Recipients {
+		if i != 0 {
+			jobID++
+		}
+		j := DispatchJob{
+			ID:          jobID,
+			Channel:     req.Channel,
+			Recipient:   re,
+			Message:     req.Message,
+			Status:      dispatchStatusQueued,
+			MaxAttempts: dispatchMaxJobRetryAttempts,
+			CreatedAt:   time.Now(),
+		}
+		jobs = append(jobs, j)
 	}
-	a.jobs = append(a.jobs, j)
 	a.mu.Unlock()
 
-	a.queue <- jobID
-
-	return nil, j
+	return nil, jobs
 }
 
 func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
