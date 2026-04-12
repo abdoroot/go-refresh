@@ -60,7 +60,7 @@ func (r CreateDispatchRequest) validate() error {
 		return fmt.Errorf("please enter valid recipient")
 	}
 
-	if !isMesssageValid(r.Message) {
+	if !isMessageValid(r.Message) {
 		return fmt.Errorf("please enter valid message")
 	}
 
@@ -85,7 +85,7 @@ func (r CreateBulkDispatchRequest) validate() error {
 		case channelWhatsapp:
 			for _, m := range r.Recipients {
 				if !isMobileNumValid(m) {
-					return fmt.Errorf("recipients mobile % not valid", m)
+					return fmt.Errorf("recipients mobile %v not valid", m)
 				}
 			}
 		case channelEmail:
@@ -99,7 +99,7 @@ func (r CreateBulkDispatchRequest) validate() error {
 		}
 	}
 
-	if !isMesssageValid(r.Message) {
+	if !isMessageValid(r.Message) {
 		return fmt.Errorf("please enter valid message")
 	}
 
@@ -257,6 +257,7 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, []DispatchJob)
 	jobs := []DispatchJob{}
 
 	jobID := a.getNewJobID()
+	createdAt := time.Now()
 	for i, re := range req.Recipients {
 		if i != 0 {
 			jobID++
@@ -268,15 +269,16 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, []DispatchJob)
 			Message:     req.Message,
 			Status:      dispatchStatusQueued,
 			MaxAttempts: dispatchMaxJobRetryAttempts,
-			CreatedAt:   time.Now(),
+			CreatedAt:   createdAt,
 		}
 		jobs = append(jobs, j)
 	}
+	a.jobs = append(a.jobs, jobs...)
 	a.mu.Unlock()
 
 	// send to queue
 	go func() {
-		for _, job := range a.jobs {
+		for _, job := range jobs {
 			a.queue <- job.ID
 		}
 	}()
@@ -450,6 +452,6 @@ func isMobileNumValid(mobile string) bool {
 	return len(mobile) > 0 && strings.Contains(mobile, "+")
 }
 
-func isMesssageValid(message string) bool {
+func isMessageValid(message string) bool {
 	return len(message) > 0
 }
