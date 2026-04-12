@@ -118,6 +118,7 @@ func (a *DispatcherAPI) Serve() error {
 	}
 
 	http.HandleFunc("/dispatch", a.dispatchHandler)
+	http.HandleFunc("/dispatch/bulk", a.bulkDispatchHandler)
 	return a.server.ListenAndServe()
 }
 
@@ -159,6 +160,8 @@ func (a *DispatcherAPI) dispatchHandler(w http.ResponseWriter, r *http.Request) 
 		a.writeJSON(w, dispatchResp{"method not allowed"}, http.StatusMethodNotAllowed)
 	}
 }
+
+func (a *DispatcherAPI) bulkDispatchHandler(w http.ResponseWriter, r *http.Request) {}
 
 func (a *DispatcherAPI) handleRetrieveJob(id int) (bool, DispatchJob) {
 	a.mu.RLock()
