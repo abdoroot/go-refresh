@@ -67,6 +67,29 @@ func (r CreateDispatchRequest) validate() error {
 	return nil
 }
 
+type CreateBulkDispatchRequest struct {
+	Channel    string   `json:"channel"`
+	Recipients []string `json:"recipients"`
+	Message    string   `json:"message"`
+}
+
+func (r CreateBulkDispatchRequest) validate() error {
+	if r.Channel != channelWhatsapp && r.Channel != channelEmail {
+		return fmt.Errorf("channel should be whatsapp or email only")
+	}
+
+	if len(r.Recipients) == 0 {
+		return fmt.Errorf("recipients should not be empty")
+	}
+
+	if len(r.Message) == 0 {
+		return fmt.Errorf("please enter valid message")
+	}
+
+	return nil
+}
+
+
 type dispatchResp struct {
 	Message string `json:"message"`
 }
@@ -161,7 +184,19 @@ func (a *DispatcherAPI) dispatchHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func (a *DispatcherAPI) bulkDispatchHandler(w http.ResponseWriter, r *http.Request) {}
+func (a *DispatcherAPI) bulkDispatchHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		err, j := a.handleCreateBulkJobs(r.Body)
+		if err != nil {
+			a.logger.Error("bulk job creation", "error", err)
+			a.writeJSON(w, dispatchResp{"bad request"}, http.StatusBadRequest)
+			return
+		}
+		a.writeJSON(w, j, http.StatusCreated)
+	} else {
+		a.writeJSON(w, dispatchResp{"method not allowed"}, http.StatusMethodNotAllowed)
+	}
+}
 
 func (a *DispatcherAPI) handleRetrieveJob(id int) (bool, DispatchJob) {
 	a.mu.RLock()
@@ -182,6 +217,35 @@ func (a *DispatcherAPI) handleRetrieveJobs() []DispatchJob {
 	copy(dist, a.jobs)
 
 	return dist
+}
+
+func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, DispatchJob) {
+	req := &CreateBulkDispatchRequest{}
+	if err := json.NewDecoder(r).Decode(req); err != nil {
+		return err, DispatchJob{}
+	}
+
+	if err := req.validate(); err != nil {
+		return err, DispatchJob{}
+	}
+
+	a.mu.Lock()
+	jobID := a.getNewJobID()
+	j := DispatchJob{
+		ID:          jobID,
+		Channel:     req.Channel,
+		Recipient:   req.Recipient,
+		Message:     req.Message,
+		Status:      dispatchStatusQueued,
+		MaxAttempts: dispatchMaxJobRetryAttempts,
+		CreatedAt:   time.Now(),
+	}
+	a.jobs = append(a.jobs, j)
+	a.mu.Unlock()
+
+	a.queue <- jobID
+
+	return nil, j
 }
 
 func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
@@ -340,4 +404,13 @@ func (a *DispatcherAPI) getJobIndex(id int) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+
+func isEmailValid(email string) bool {
+	return strings.Contains(email,"@")
+}
+
+func isMobileNumValid(mobile string) bool {
+	return len(mobile) > 0 && strings.Contains("+")
 }
