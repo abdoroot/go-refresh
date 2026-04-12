@@ -99,7 +99,7 @@ func (r CreateBulkDispatchRequest) validate() error {
 		}
 	}
 
-	if isMesssageValid(r.Message) {
+	if !isMesssageValid(r.Message) {
 		return fmt.Errorf("please enter valid message")
 	}
 
@@ -273,6 +273,13 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, []DispatchJob)
 		jobs = append(jobs, j)
 	}
 	a.mu.Unlock()
+
+	// send to queue
+	go func() {
+		for _, job := range a.jobs {
+			a.queue <- job.ID
+		}
+	}()
 
 	return nil, jobs
 }
