@@ -105,7 +105,7 @@ func (a *DispatcherAPI) Serve() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go a.handleShutdown(ctx, cancel, sigChan)
+	go a.handleShutdown(cancel, sigChan)
 	a.logger.Info("server starting at", "port", a.server.Addr)
 
 	// workers
@@ -210,7 +210,7 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
 	return nil, j
 }
 
-func (a *DispatcherAPI) handleShutdown(ctx context.Context, cancel context.CancelFunc, sigChan chan os.Signal) {
+func (a *DispatcherAPI) handleShutdown(cancel context.CancelFunc, sigChan chan os.Signal) {
 	<-sigChan
 	a.logger.Info("shutdown signal received")
 	cancel()
