@@ -91,11 +91,11 @@ func (r CreateBulkDispatchRequest) validate() error {
 		case channelEmail:
 			for _, e := range r.Recipients {
 				if !isEmailValid(e) {
-					return fmt.Errorf("recipients emobil% not valid", e)
+					return fmt.Errorf("recipients email %v not valid", e)
 				}
 			}
 		default:
-			return fmt.Errorf("unkonw recipients type")
+			return fmt.Errorf("unknown recipients type")
 		}
 	}
 
