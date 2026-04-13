@@ -26,7 +26,7 @@ const (
 	dispatchStatusSent       = "sent"
 	dispatchStatusFailed     = "failed"
 
-	redisListKey      = "dispatch:queue"
+	redisQueueKey      = "dispatch:queue"
 	redisJobKey       = "dispatch:queue"
 	redisLastQueueKey = "dispatch:last_queue_id"
 )
@@ -274,18 +274,14 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
 
-	qk := getJobQueueKey(id)
-	js, err := a.rdb.Get(ctx, qk).Result()
+	qk := getNewJobQueueKey(id)
+	job := DispatchJob{}
+	err := a.rdb.HGetAll(ctx, qk).Scan(&job)
 	if err != nil {
 		return DispatchJob{}, err
 	}
 
-	j := DispatchJob{}
-	if err := j.Unmarshal(js); err != nil {
-		return DispatchJob{}, err
-	}
-
-	return j, nil
+	return job, nil
 }
 
 func (a *DispatcherAPI) handleRetrieveJobs() []DispatchJob {
@@ -342,7 +338,7 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 	if err != nil {
 		return DispatchJob{}, err
 	}
-	qk := getJobQueueKey(jobID)
+	qk := getNewJobQueueKey(jobID)
 	j := DispatchJob{
 		ID:          jobID,
 		Channel:     req.Channel,
@@ -353,22 +349,15 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 		CreatedAt:   time.Now(),
 	}
 
-	b, err := j.Marshal()
-	if err != nil {
-		return DispatchJob{}, err
-	}
-	// json string
-	js := string(b)
-
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	err = a.rdb.Set(ctx, qk, js, 0).Err()
+	err = a.rdb.HSet(ctx, qk, j, 0).Err()
 	cancel()
 	if err != nil {
 		return DispatchJob{}, err
 	}
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	err = a.rdb.RPush(ctx2, redisListKey, jobID).Err()
+	err = a.rdb.RPush(ctx2, redisQueueKey, jobID).Err()
 	cancel2()
 	if err != nil {
 		return DispatchJob{}, err
@@ -420,7 +409,7 @@ func (a *DispatcherAPI) Worker(ctx context.Context) {
 			return
 		default:
 			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-			res, err := a.rdb.BLPop(ctx, redisConnectionTimeout, redisListKey).Result()
+			res, err := a.rdb.BLPop(ctx, redisConnectionTimeout, redisQueueKey).Result()
 			cancel()
 			if err != nil {
 				if err != redis.Nil {
@@ -484,7 +473,7 @@ func (a *DispatcherAPI) processFailedDispatchJob(id uint32) {
 			<-time.After(time.Second)
 			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 			defer cancel()
-			if err := a.rdb.RPush(ctx, redisListKey, id).Err(); err != nil {
+			if err := a.rdb.RPush(ctx, redisQueueKey, id).Err(); err != nil {
 				a.logger.Error("redis RPush", "error", err, "id", id)
 			}
 		}()
@@ -509,14 +498,9 @@ func (a *DispatcherAPI) updateDispatchJobStatus(id uint32, status string) error 
 		j.Attempts++
 	}
 
-	b, err := j.Marshal()
-	if err != nil {
-		return err
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
-	if err := a.rdb.Set(ctx, getJobQueueKey(id), string(b), 0).Err(); err != nil {
+	if err := a.rdb.HSet(ctx, getNewJobQueueKey(id), j, 0).Err(); err != nil {
 		return err
 	}
 	return nil
@@ -546,7 +530,7 @@ func (a *DispatcherAPI) getNewJobID() (uint32, error) {
 	return id, nil
 }
 
-func getJobQueueKey(id uint32) string {
+func getNewJobQueueKey(id uint32) string {
 	return fmt.Sprintf("%v:%v", redisJobKey, id)
 }
 
