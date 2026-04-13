@@ -289,7 +289,7 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
 
-	qk := getNewJobKey(id)
+	qk := getJobKey(id)
 	fields, err := a.rdb.HGetAll(ctx, qk).Result()
 	if err != nil {
 		return DispatchJob{}, err
@@ -391,7 +391,7 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 	}
 
 	// save the job
-	qk := getNewJobKey(jobID)
+	qk := getJobKey(jobID)
 	m, err := job.ToMap()
 	if err != nil {
 		return DispatchJob{}, err
@@ -554,7 +554,15 @@ func (a *DispatcherAPI) updateDispatchJobStatus(id uint32, status string) error 
 
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
-	if err := a.rdb.HSet(ctx, getNewJobKey(id), m).Err(); err != nil {
+
+	err = a.rdb.Watch(ctx, func(tx *redis.Tx) error {
+		if err := tx.HSet(ctx, getJobKey(id), m).Err(); err != nil {
+			return err
+		}
+		return nil
+	}, getJobKey(id))
+
+	if err != nil {
 		return err
 	}
 	return nil
@@ -584,7 +592,7 @@ func (a *DispatcherAPI) getNewJobID() (uint32, error) {
 	return id, nil
 }
 
-func getNewJobKey(id uint32) string {
+func getJobKey(id uint32) string {
 	return fmt.Sprintf("%v:%v", redisJobKey, id)
 }
 
