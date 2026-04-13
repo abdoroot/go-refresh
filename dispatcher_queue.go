@@ -232,7 +232,12 @@ func (a *DispatcherAPI) dispatchHandler(w http.ResponseWriter, r *http.Request) 
 		id := r.URL.Query().Get("id")
 		if id == "" {
 			// Retrieve all jobs
-			js := a.handleRetrieveJobs()
+			js, err := a.handleRetrieveJobs()
+			if err != nil {
+				a.logger.Error("retrieve dispatch jobs", "error", err)
+				a.writeJSON(w, dispatchResp{"internal error"}, http.StatusInternalServerError)
+				return
+			}
 			a.writeJSON(w, js, http.StatusOK)
 			return
 		} else {
@@ -296,8 +301,32 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 	return mapToDispatchJob(fields)
 }
 
-func (a *DispatcherAPI) handleRetrieveJobs() []DispatchJob {
-	return []DispatchJob{}
+func (a *DispatcherAPI) handleRetrieveJobs() ([]DispatchJob, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	jobs := []DispatchJob{}
+	r := fmt.Sprintf("%v:*", redisJobKey)
+	iter := a.rdb.Scan(ctx, 0, r, 0).Iterator()
+
+	for iter.Next(ctx) {
+		key := iter.Val()
+		idString := strings.TrimPrefix(key, fmt.Sprintf("%v:", redisJobKey))
+		id, err := strconv.ParseUint(idString, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		idInt32 := uint32(id)
+		job, err := a.handleRetrieveJob(idInt32)
+		if err != nil {
+			return nil, err
+		}
+
+		jobs = append(jobs, job)
+	}
+
+	return jobs, nil
 }
 
 func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) ([]DispatchJob, error) {

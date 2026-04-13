@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -46,7 +45,6 @@ func newTestDispatcher(process func(context.Context, redis.Cmder) error) *Dispat
 
 	return &DispatcherAPI{
 		rdb:     rdb,
-		mu:      &sync.RWMutex{},
 		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		lastKey: &atomic.Uint32{},
 	}
