@@ -26,7 +26,7 @@ const (
 	dispatchStatusSent       = "sent"
 	dispatchStatusFailed     = "failed"
 
-	redisQueueKey      = "dispatch:queue"
+	redisQueueKey     = "dispatch:queue"
 	redisJobKey       = "dispatch:queue"
 	redisLastQueueKey = "dispatch:last_queue_id"
 )
@@ -274,7 +274,7 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
 
-	qk := getNewJobQueueKey(id)
+	qk := getNewJobKey(id)
 	job := DispatchJob{}
 	err := a.rdb.HGetAll(ctx, qk).Scan(&job)
 	if err != nil {
@@ -338,8 +338,8 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 	if err != nil {
 		return DispatchJob{}, err
 	}
-	qk := getNewJobQueueKey(jobID)
-	j := DispatchJob{
+
+	job := DispatchJob{
 		ID:          jobID,
 		Channel:     req.Channel,
 		Recipient:   req.Recipient,
@@ -349,13 +349,16 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 		CreatedAt:   time.Now(),
 	}
 
+	// save the job
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	err = a.rdb.HSet(ctx, qk, j, 0).Err()
+	qk := getNewJobKey(jobID) 
+	err = a.rdb.HSet(ctx, qk, job).Err()
 	cancel()
 	if err != nil {
 		return DispatchJob{}, err
 	}
 
+	// push the job to queue
 	ctx2, cancel2 := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	err = a.rdb.RPush(ctx2, redisQueueKey, jobID).Err()
 	cancel2()
@@ -363,7 +366,7 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 		return DispatchJob{}, err
 	}
 
-	return j, nil
+	return job, nil
 }
 
 func rdbGetLastJobId(rdb *redis.Client) (uint32, error) {
@@ -500,7 +503,7 @@ func (a *DispatcherAPI) updateDispatchJobStatus(id uint32, status string) error 
 
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
-	if err := a.rdb.HSet(ctx, getNewJobQueueKey(id), j, 0).Err(); err != nil {
+	if err := a.rdb.HSet(ctx, getNewJobKey(id), j, 0).Err(); err != nil {
 		return err
 	}
 	return nil
@@ -530,7 +533,7 @@ func (a *DispatcherAPI) getNewJobID() (uint32, error) {
 	return id, nil
 }
 
-func getNewJobQueueKey(id uint32) string {
+func getNewJobKey(id uint32) string {
 	return fmt.Sprintf("%v:%v", redisJobKey, id)
 }
 
