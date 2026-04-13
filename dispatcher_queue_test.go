@@ -69,15 +69,11 @@ func TestGetNewJobIDReturnsRedisError(t *testing.T) {
 }
 
 func TestHandleCreateJobReturnsJobSetError(t *testing.T) {
-	redisErr := errors.New("redis job set failed")
-	setCalls := 0
+	redisErr := errors.New("redis job hset failed")
 	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
-		if strings.EqualFold(cmd.Name(), "set") {
-			setCalls++
-			if setCalls == 2 {
-				cmd.SetErr(redisErr)
-				return redisErr
-			}
+		if strings.EqualFold(cmd.Name(), "hset") {
+			cmd.SetErr(redisErr)
+			return redisErr
 		}
 		return nil
 	})
@@ -105,9 +101,9 @@ func TestHandleCreateJobReturnsQueuePushError(t *testing.T) {
 }
 
 func TestUpdateDispatchJobStatusReturnsRedisGetError(t *testing.T) {
-	redisErr := errors.New("redis get failed")
+	redisErr := errors.New("redis hgetall failed")
 	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
-		if strings.EqualFold(cmd.Name(), "get") {
+		if strings.EqualFold(cmd.Name(), "hgetall") {
 			cmd.SetErr(redisErr)
 			return redisErr
 		}

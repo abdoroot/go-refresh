@@ -44,14 +44,27 @@ const (
 )
 
 type DispatchJob struct {
-	ID          uint32    `json:"id"`
-	Channel     string    `json:"channel"`
-	Recipient   string    `json:"recipient"`
-	Message     string    `json:"message"`
-	Status      string    `json:"status"`
-	Attempts    int       `json:"attempts"`
-	MaxAttempts int       `json:"max_attempts"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          uint32    `json:"id" redis:"id"`
+	Channel     string    `json:"channel" redis:"channel"`
+	Recipient   string    `json:"recipient" redis:"recipient"`
+	Message     string    `json:"message" redis:"message"`
+	Status      string    `json:"status" redis:"status"`
+	Attempts    int       `json:"attempts" redis:"attempts"`
+	MaxAttempts int       `json:"max_attempts" redis:"max_attempts"`
+	CreatedAt   time.Time `json:"created_at" redis:"created_at"`
+}
+
+func (r DispatchJob) ToMap() (map[string]any, error) {
+	return map[string]any{
+		"id":           r.ID,
+		"channel":      r.Channel,
+		"recipient":    r.Recipient,
+		"message":      r.Message,
+		"status":       r.Status,
+		"attempts":     r.Attempts,
+		"max_attempts": r.MaxAttempts,
+		"created_at":   r.CreatedAt.Format(time.RFC3339Nano),
+	}, nil
 }
 
 func (r DispatchJob) Marshal() ([]byte, error) {
@@ -275,13 +288,15 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 	defer cancel()
 
 	qk := getNewJobKey(id)
-	job := DispatchJob{}
-	err := a.rdb.HGetAll(ctx, qk).Scan(&job)
+	fields, err := a.rdb.HGetAll(ctx, qk).Result()
 	if err != nil {
 		return DispatchJob{}, err
 	}
+	if len(fields) == 0 {
+		return DispatchJob{}, fmt.Errorf("job %d not found", id)
+	}
 
-	return job, nil
+	return mapToDispatchJob(fields)
 }
 
 func (a *DispatcherAPI) handleRetrieveJobs() []DispatchJob {
@@ -350,9 +365,14 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 	}
 
 	// save the job
+	qk := getNewJobKey(jobID)
+	m, err := job.ToMap()
+	if err != nil {
+		return DispatchJob{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	qk := getNewJobKey(jobID) 
-	err = a.rdb.HSet(ctx, qk, job).Err()
+	err = a.rdb.HSet(ctx, qk, m).Err()
 	cancel()
 	if err != nil {
 		return DispatchJob{}, err
@@ -501,9 +521,14 @@ func (a *DispatcherAPI) updateDispatchJobStatus(id uint32, status string) error 
 		j.Attempts++
 	}
 
+	m, err := j.ToMap()
+	if err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
-	if err := a.rdb.HSet(ctx, getNewJobKey(id), j, 0).Err(); err != nil {
+	if err := a.rdb.HSet(ctx, getNewJobKey(id), m).Err(); err != nil {
 		return err
 	}
 	return nil
@@ -535,6 +560,39 @@ func (a *DispatcherAPI) getNewJobID() (uint32, error) {
 
 func getNewJobKey(id uint32) string {
 	return fmt.Sprintf("%v:%v", redisJobKey, id)
+}
+
+func mapToDispatchJob(fields map[string]string) (DispatchJob, error) {
+	id, err := strconv.ParseUint(fields["id"], 10, 32)
+	if err != nil {
+		return DispatchJob{}, fmt.Errorf("parsing job id: %w", err)
+	}
+
+	attempts, err := strconv.Atoi(fields["attempts"])
+	if err != nil {
+		return DispatchJob{}, fmt.Errorf("parsing job attempts: %w", err)
+	}
+
+	maxAttempts, err := strconv.Atoi(fields["max_attempts"])
+	if err != nil {
+		return DispatchJob{}, fmt.Errorf("parsing job max attempts: %w", err)
+	}
+
+	createdAt, err := time.Parse(time.RFC3339Nano, fields["created_at"])
+	if err != nil {
+		return DispatchJob{}, fmt.Errorf("parsing job created at: %w", err)
+	}
+
+	return DispatchJob{
+		ID:          uint32(id),
+		Channel:     fields["channel"],
+		Recipient:   fields["recipient"],
+		Message:     fields["message"],
+		Status:      fields["status"],
+		Attempts:    attempts,
+		MaxAttempts: maxAttempts,
+		CreatedAt:   createdAt,
+	}, nil
 }
 
 func isEmailValid(email string) bool {
