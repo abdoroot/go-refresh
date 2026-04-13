@@ -153,7 +153,6 @@ type dispatchResp struct {
 
 type DispatcherAPI struct {
 	rdb     *redis.Client
-	mu      *sync.RWMutex
 	server  *http.Server
 	logger  *slog.Logger
 	lastKey *atomic.Uint32
@@ -165,7 +164,6 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 		addr = fmt.Sprintf(":%v", addr)
 	}
 
-	mu := &sync.RWMutex{}
 	server := &http.Server{Addr: addr}
 
 	rdb := redis.NewClient(&redis.Options{
@@ -189,7 +187,6 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 	}
 
 	return &DispatcherAPI{
-		mu:      mu,
 		server:  server,
 		logger:  logger,
 		rdb:     rdb,
