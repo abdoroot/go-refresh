@@ -35,26 +35,14 @@ const (
 	dispatchWorkerCount         = 3
 	dispatchMaxJobRetryAttempts = 3
 
-	redisConnectionTimeout = time.Second * 2
+	redisConnectionTimeout      = time.Second * 2
+	redisTransactionMaxAttempts = 3
 )
 
 const (
 	channelWhatsapp = "whatsapp"
 	channelEmail    = "email"
 )
-
-var updateDispatchJobStatusScript = redis.NewScript(`
-if redis.call("EXISTS", KEYS[1]) == 0 then
-	return 0
-end
-
-redis.call("HSET", KEYS[1], "status", ARGV[1])
-if ARGV[1] == ARGV[2] then
-	redis.call("HINCRBY", KEYS[1], "attempts", 1)
-end
-
-return 1
-`)
 
 type DispatchJob struct {
 	ID          uint32    `json:"id" redis:"id"`
@@ -553,20 +541,37 @@ func (a *DispatcherAPI) updateDispatchJobStatus(id uint32, status string) error 
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
 
-	updated, err := updateDispatchJobStatusScript.Run(
-		ctx,
-		a.rdb,
-		[]string{getJobKey(id)},
-		status,
-		dispatchStatusProcessing,
-	).Int()
-	if err != nil {
+	key := getJobKey(id)
+	var lastErr error
+	for range redisTransactionMaxAttempts {
+		err := a.rdb.Watch(ctx, func(tx *redis.Tx) error {
+			exists, err := tx.Exists(ctx, key).Result()
+			if err != nil {
+				return err
+			}
+			if exists == 0 {
+				return fmt.Errorf("job %d not found", id)
+			}
+
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				if status == dispatchStatusProcessing {
+					pipe.HIncrBy(ctx, key, "attempts", 1)
+				}
+				pipe.HSet(ctx, key, "status", status)
+				return nil
+			})
+			return err
+		}, key)
+		if err == redis.TxFailedErr {
+			lastErr = err
+			continue
+		}
 		return err
 	}
-	if updated == 0 {
-		return fmt.Errorf("job %d not found", id)
-	}
 
+	if lastErr != nil {
+		return fmt.Errorf("update dispatch job status after %d attempts: %w", redisTransactionMaxAttempts, lastErr)
+	}
 	return nil
 }
 

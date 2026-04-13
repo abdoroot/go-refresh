@@ -31,7 +31,17 @@ func (h redisCommandHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook 
 }
 
 func (h redisCommandHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return next
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			if h.process == nil {
+				continue
+			}
+			if err := h.process(ctx, cmd); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 func newTestDispatcher(process func(context.Context, redis.Cmder) error) *DispatcherAPI {
@@ -98,10 +108,10 @@ func TestHandleCreateJobReturnsQueuePushError(t *testing.T) {
 	}
 }
 
-func TestUpdateDispatchJobStatusReturnsRedisScriptError(t *testing.T) {
-	redisErr := errors.New("redis eval failed")
+func TestUpdateDispatchJobStatusReturnsRedisExistsError(t *testing.T) {
+	redisErr := errors.New("redis exists failed")
 	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
-		if strings.EqualFold(cmd.Name(), "evalsha") || strings.EqualFold(cmd.Name(), "eval") {
+		if strings.EqualFold(cmd.Name(), "exists") {
 			cmd.SetErr(redisErr)
 			return redisErr
 		}
@@ -116,12 +126,12 @@ func TestUpdateDispatchJobStatusReturnsRedisScriptError(t *testing.T) {
 
 func TestUpdateDispatchJobStatusReturnsNotFound(t *testing.T) {
 	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
-		if strings.EqualFold(cmd.Name(), "evalsha") || strings.EqualFold(cmd.Name(), "eval") {
-			redisCmd, ok := cmd.(*redis.Cmd)
+		if strings.EqualFold(cmd.Name(), "exists") {
+			redisCmd, ok := cmd.(*redis.IntCmd)
 			if !ok {
-				t.Fatalf("expected *redis.Cmd, got %T", cmd)
+				t.Fatalf("expected *redis.IntCmd, got %T", cmd)
 			}
-			redisCmd.SetVal(int64(0))
+			redisCmd.SetVal(0)
 		}
 		return nil
 	})
@@ -132,19 +142,34 @@ func TestUpdateDispatchJobStatusReturnsNotFound(t *testing.T) {
 	}
 }
 
-func TestUpdateDispatchJobStatusUsesRedisScript(t *testing.T) {
+func TestUpdateDispatchJobStatusUsesRedisHashCommands(t *testing.T) {
+	var sawHIncrBy bool
+	var sawHSet bool
+
 	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
-		if strings.EqualFold(cmd.Name(), "evalsha") || strings.EqualFold(cmd.Name(), "eval") {
-			redisCmd, ok := cmd.(*redis.Cmd)
+		if strings.EqualFold(cmd.Name(), "exists") {
+			redisCmd, ok := cmd.(*redis.IntCmd)
 			if !ok {
-				t.Fatalf("expected *redis.Cmd, got %T", cmd)
+				t.Fatalf("expected *redis.IntCmd, got %T", cmd)
 			}
-			redisCmd.SetVal(int64(1))
+			redisCmd.SetVal(1)
+		}
+		if strings.EqualFold(cmd.Name(), "hincrby") {
+			sawHIncrBy = true
+		}
+		if strings.EqualFold(cmd.Name(), "hset") {
+			sawHSet = true
 		}
 		return nil
 	})
 
 	if err := api.updateDispatchJobStatus(1, dispatchStatusProcessing); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !sawHIncrBy {
+		t.Fatal("expected HINCRBY command")
+	}
+	if !sawHSet {
+		t.Fatal("expected HSET command")
 	}
 }
