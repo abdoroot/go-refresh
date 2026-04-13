@@ -98,10 +98,10 @@ func TestHandleCreateJobReturnsQueuePushError(t *testing.T) {
 	}
 }
 
-func TestUpdateDispatchJobStatusReturnsRedisGetError(t *testing.T) {
-	redisErr := errors.New("redis hgetall failed")
+func TestUpdateDispatchJobStatusReturnsRedisScriptError(t *testing.T) {
+	redisErr := errors.New("redis eval failed")
 	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
-		if strings.EqualFold(cmd.Name(), "hgetall") {
+		if strings.EqualFold(cmd.Name(), "evalsha") || strings.EqualFold(cmd.Name(), "eval") {
 			cmd.SetErr(redisErr)
 			return redisErr
 		}
@@ -111,5 +111,40 @@ func TestUpdateDispatchJobStatusReturnsRedisGetError(t *testing.T) {
 	err := api.updateDispatchJobStatus(1, dispatchStatusProcessing)
 	if !errors.Is(err, redisErr) {
 		t.Fatalf("expected redis error, got %v", err)
+	}
+}
+
+func TestUpdateDispatchJobStatusReturnsNotFound(t *testing.T) {
+	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
+		if strings.EqualFold(cmd.Name(), "evalsha") || strings.EqualFold(cmd.Name(), "eval") {
+			redisCmd, ok := cmd.(*redis.Cmd)
+			if !ok {
+				t.Fatalf("expected *redis.Cmd, got %T", cmd)
+			}
+			redisCmd.SetVal(int64(0))
+		}
+		return nil
+	})
+
+	err := api.updateDispatchJobStatus(1, dispatchStatusProcessing)
+	if err == nil || !strings.Contains(err.Error(), "job 1 not found") {
+		t.Fatalf("expected job not found error, got %v", err)
+	}
+}
+
+func TestUpdateDispatchJobStatusUsesRedisScript(t *testing.T) {
+	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
+		if strings.EqualFold(cmd.Name(), "evalsha") || strings.EqualFold(cmd.Name(), "eval") {
+			redisCmd, ok := cmd.(*redis.Cmd)
+			if !ok {
+				t.Fatalf("expected *redis.Cmd, got %T", cmd)
+			}
+			redisCmd.SetVal(int64(1))
+		}
+		return nil
+	})
+
+	if err := api.updateDispatchJobStatus(1, dispatchStatusProcessing); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
 	}
 }

@@ -43,6 +43,19 @@ const (
 	channelEmail    = "email"
 )
 
+var updateDispatchJobStatusScript = redis.NewScript(`
+if redis.call("EXISTS", KEYS[1]) == 0 then
+	return 0
+end
+
+redis.call("HSET", KEYS[1], "status", ARGV[1])
+if ARGV[1] == ARGV[2] then
+	redis.call("HINCRBY", KEYS[1], "attempts", 1)
+end
+
+return 1
+`)
+
 type DispatchJob struct {
 	ID          uint32    `json:"id" redis:"id"`
 	Channel     string    `json:"channel" redis:"channel"`
@@ -537,34 +550,23 @@ func (a *DispatcherAPI) processFailedDispatchJob(id uint32) {
 }
 
 func (a *DispatcherAPI) updateDispatchJobStatus(id uint32, status string) error {
-	j, err := a.handleRetrieveJob(id)
-	if err != nil {
-		return err
-	}
-
-	j.Status = status
-	if status == dispatchStatusProcessing {
-		j.Attempts++
-	}
-
-	m, err := j.ToMap()
-	if err != nil {
-		return err
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
 
-	err = a.rdb.Watch(ctx, func(tx *redis.Tx) error {
-		if err := tx.HSet(ctx, getJobKey(id), m).Err(); err != nil {
-			return err
-		}
-		return nil
-	}, getJobKey(id))
-
+	updated, err := updateDispatchJobStatusScript.Run(
+		ctx,
+		a.rdb,
+		[]string{getJobKey(id)},
+		status,
+		dispatchStatusProcessing,
+	).Int()
 	if err != nil {
 		return err
 	}
+	if updated == 0 {
+		return fmt.Errorf("job %d not found", id)
+	}
+
 	return nil
 }
 
