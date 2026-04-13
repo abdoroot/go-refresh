@@ -14,6 +14,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -26,6 +28,10 @@ const (
 const dispatchWorkerCount = 3
 
 const dispatchMaxJobRetryAttempts = 3
+
+const redisConnectionTimeout = time.Second * 2
+
+const redisListKey = "dispatch:queue"
 
 const channelWhatsapp = "whatsapp"
 const channelEmail = "email"
@@ -112,27 +118,34 @@ type dispatchResp struct {
 
 type DispatcherAPI struct {
 	jobs   []DispatchJob
-	queue  chan int
+	rdb    *redis.Client
 	mu     *sync.RWMutex
 	server *http.Server
 	logger *slog.Logger
 	wg     sync.WaitGroup
 }
 
-func NewDispatcherAPI(Addr string) *DispatcherAPI {
-	if !strings.HasPrefix(Addr, ":") {
-		Addr = fmt.Sprintf(":%v", Addr)
+func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
+	if !strings.HasPrefix(addr, ":") {
+		addr = fmt.Sprintf(":%v", addr)
 	}
 
 	mu := &sync.RWMutex{}
-	server := &http.Server{Addr: Addr}
+	server := &http.Server{Addr: addr}
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     redisHost,
+		Password: "",
+		DB:       0,
+	})
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	return &DispatcherAPI{
 		jobs:   make([]DispatchJob, 0),
 		mu:     mu,
 		server: server,
 		logger: logger,
-		queue:  make(chan int, 50),
+		rdb:    rdb,
 		wg:     sync.WaitGroup{},
 	}
 }
@@ -279,7 +292,9 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, []DispatchJob)
 	// send to queue
 	go func() {
 		for _, job := range jobs {
-			a.queue <- job.ID
+			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+			a.rdb.RPush(ctx, redisListKey, job.ID)
+			cancel()
 		}
 	}()
 
@@ -310,7 +325,9 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
 	a.jobs = append(a.jobs, j)
 	a.mu.Unlock()
 
-	a.queue <- jobID
+	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+	defer cancel()
+	a.rdb.RPush(ctx, redisListKey, jobID)
 
 	return nil, j
 }
@@ -326,6 +343,10 @@ func (a *DispatcherAPI) handleShutdown(cancel context.CancelFunc, sigChan chan o
 	a.server.Shutdown(shutdownCtx)
 
 	a.wg.Wait()
+	// workers finish
+	if err := a.rdb.Close(); err != nil {
+		a.logger.Error("closing redis conn", "err", err)
+	}
 }
 
 func (a *DispatcherAPI) Worker(ctx context.Context) {
@@ -334,14 +355,24 @@ func (a *DispatcherAPI) Worker(ctx context.Context) {
 
 	for {
 		select {
-		case id, ok := <-a.queue:
-			if !ok {
-				return
-			}
-			a.simulateSend(id)
 		case <-ctx.Done():
-			a.logger.Info("dispatcher worker stop", "error", ctx.Err())
+			a.logger.Info("dispatcher worker stop", "error", ctx)
 			return
+		default:
+			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+			res, err := a.rdb.BLPop(ctx, redisConnectionTimeout, redisListKey).Result()
+			cancel()
+			if err != nil {
+				a.logger.Error("redis BLPop", "error", ctx.Err())
+				continue
+			}
+			idString := res[1]
+			idInt, err := strconv.Atoi(idString)
+			if err != nil {
+				a.logger.Error("string to int", "str", idString)
+				continue
+			}
+			a.simulateSend(idInt)
 		}
 	}
 }
@@ -393,7 +424,9 @@ func (a *DispatcherAPI) processFailedDispatchJob(id int) {
 		if ok {
 			go func() {
 				<-time.After(time.Second)
-				a.queue <- id
+				ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+				defer cancel()
+				a.rdb.RPush(ctx, redisListKey, id)
 			}()
 		}
 		return
