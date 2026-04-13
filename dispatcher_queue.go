@@ -25,18 +25,23 @@ const (
 	dispatchStatusProcessing = "processing"
 	dispatchStatusSent       = "sent"
 	dispatchStatusFailed     = "failed"
+
+	redisListKey      = "dispatch:queue"
+	redisJobKey       = "dispatch:queue"
+	redisLastQueueKey = "dispatch:last_queue_id"
 )
 
-const dispatchWorkerCount = 3
+const (
+	dispatchWorkerCount         = 3
+	dispatchMaxJobRetryAttempts = 3
 
-const dispatchMaxJobRetryAttempts = 3
+	redisConnectionTimeout = time.Second * 2
+)
 
-const redisConnectionTimeout = time.Second * 2
-const redisListKey = "dispatch:queue"
-const redisLastQueueKey = "dispatch:last_queue_id"
-
-const channelWhatsapp = "whatsapp"
-const channelEmail = "email"
+const (
+	channelWhatsapp = "whatsapp"
+	channelEmail    = "email"
+)
 
 type DispatchJob struct {
 	ID          uint32    `json:"id"`
@@ -134,7 +139,6 @@ type dispatchResp struct {
 }
 
 type DispatcherAPI struct {
-	//jobs    []DispatchJob
 	rdb     *redis.Client
 	mu      *sync.RWMutex
 	server  *http.Server
@@ -172,7 +176,6 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 	}
 
 	return &DispatcherAPI{
-		//jobs:    make([]DispatchJob, 0),
 		mu:      mu,
 		server:  server,
 		logger:  logger,
@@ -322,15 +325,6 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) ([]DispatchJob, error)
 		jobs = append(jobs, j)
 	}
 
-	// send to queue
-	go func() {
-		for _, job := range jobs {
-			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-			a.rdb.RPush(ctx, redisListKey, job.ID)
-			cancel()
-		}
-	}()
-
 	return jobs, nil
 }
 
@@ -367,15 +361,18 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 	js := string(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	a.rdb.Set(ctx, qk, js, 0).Err()
+	err = a.rdb.Set(ctx, qk, js, 0).Err()
 	cancel()
 	if err != nil {
 		return DispatchJob{}, err
 	}
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	a.rdb.RPush(ctx2, redisListKey, jobID)
+	err = a.rdb.RPush(ctx2, redisListKey, jobID).Err()
 	cancel2()
+	if err != nil {
+		return DispatchJob{}, err
+	}
 
 	return j, nil
 }
@@ -426,7 +423,9 @@ func (a *DispatcherAPI) Worker(ctx context.Context) {
 			res, err := a.rdb.BLPop(ctx, redisConnectionTimeout, redisListKey).Result()
 			cancel()
 			if err != nil {
-				//a.logger.Error("redis b", "error", ctx.Err())
+				if err != redis.Nil {
+					a.logger.Error("redis BLPop", "error", err)
+				}
 				continue
 			}
 			idString := res[1]
@@ -485,7 +484,9 @@ func (a *DispatcherAPI) processFailedDispatchJob(id uint32) {
 			<-time.After(time.Second)
 			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 			defer cancel()
-			a.rdb.RPush(ctx, redisListKey, id)
+			if err := a.rdb.RPush(ctx, redisListKey, id).Err(); err != nil {
+				a.logger.Error("redis RPush", "error", err, "id", id)
+			}
 		}()
 		return
 	}
@@ -546,7 +547,7 @@ func (a *DispatcherAPI) getNewJobID() (uint32, error) {
 }
 
 func getJobQueueKey(id uint32) string {
-	return fmt.Sprintf("%v:%v", redisListKey, id)
+	return fmt.Sprintf("%v:%v", redisJobKey, id)
 }
 
 func isEmailValid(email string) bool {
