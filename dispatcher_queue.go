@@ -27,8 +27,8 @@ const (
 	dispatchStatusFailed     = "failed"
 
 	redisQueueKey     = "dispatch:queue"
-	redisJobKey       = "dispatch:queue"
-	redisLastQueueKey = "dispatch:last_queue_id"
+	redisJobKey       = "dispatch:job"
+	redisLastQueueKey = "dispatch:last_id"
 )
 
 const (
