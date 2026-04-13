@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -52,7 +53,7 @@ func (r DispatchJob) Marshal() ([]byte, error) {
 	return json.Marshal(r)
 }
 
-func (r *DispatchJob) UnMarshal(s string) error {
+func (r *DispatchJob) Unmarshal(s string) error {
 	if err := json.Unmarshal([]byte(s), r); err != nil {
 		return err
 	}
@@ -83,6 +84,10 @@ func (r CreateDispatchRequest) validate() error {
 	}
 
 	return nil
+}
+
+func (r CreateDispatchRequest) Marshal() ([]byte, error) {
+	return json.Marshal(r)
 }
 
 type CreateBulkDispatchRequest struct {
@@ -129,7 +134,7 @@ type dispatchResp struct {
 }
 
 type DispatcherAPI struct {
-	jobs    []DispatchJob
+	//jobs    []DispatchJob
 	rdb     *redis.Client
 	mu      *sync.RWMutex
 	server  *http.Server
@@ -160,12 +165,14 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 		logger.Error("getting last job id from the queue", "err", err)
 	}
 
+	logger.Info("last job id from the queue", "id", lastDBKey)
+
 	if lastDBKey != 0 {
 		lastKey.Add(lastDBKey)
 	}
 
 	return &DispatcherAPI{
-		jobs:    make([]DispatchJob, 0),
+		//jobs:    make([]DispatchJob, 0),
 		mu:      mu,
 		server:  server,
 		logger:  logger,
@@ -201,7 +208,7 @@ func (a *DispatcherAPI) Serve() error {
 
 func (a *DispatcherAPI) dispatchHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		err, j := a.handleCreateJob(r.Body)
+		j, err := a.handleCreateJob(r.Body)
 		if err != nil {
 			a.logger.Error("job creation", "error", err)
 			a.writeJSON(w, dispatchResp{"bad request"}, http.StatusBadRequest)
@@ -240,7 +247,7 @@ func (a *DispatcherAPI) dispatchHandler(w http.ResponseWriter, r *http.Request) 
 
 func (a *DispatcherAPI) bulkDispatchHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		err, jobs := a.handleCreateBulkJobs(r.Body)
+		jobs, err := a.handleCreateBulkJobs(r.Body)
 		if err != nil {
 			a.logger.Error("bulk job creation", "error", err)
 			a.writeJSON(w, dispatchResp{"bad request"}, http.StatusBadRequest)
@@ -271,7 +278,7 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 	}
 
 	j := DispatchJob{}
-	if err := j.UnMarshal(js); err != nil {
+	if err := j.Unmarshal(js); err != nil {
 		return DispatchJob{}, err
 	}
 
@@ -279,44 +286,41 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 }
 
 func (a *DispatcherAPI) handleRetrieveJobs() []DispatchJob {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	dist := make([]DispatchJob, len(a.jobs))
-	copy(dist, a.jobs)
-
-	return dist
+	return []DispatchJob{}
 }
 
-func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, []DispatchJob) {
-	req := &CreateBulkDispatchRequest{}
-	if err := json.NewDecoder(r).Decode(req); err != nil {
-		return err, nil
+func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) ([]DispatchJob, error) {
+	bulkReq := &CreateBulkDispatchRequest{}
+	if err := json.NewDecoder(r).Decode(bulkReq); err != nil {
+		return nil, err
 	}
 
-	if err := req.validate(); err != nil {
-		return err, nil
+	if err := bulkReq.validate(); err != nil {
+		return nil, err
 	}
 
-	a.mu.Lock()
 	jobs := []DispatchJob{}
 
-	createdAt := time.Now()
-	for _, re := range req.Recipients {
-		jobID := a.getNewJobID()
-		j := DispatchJob{
-			ID:          jobID,
-			Channel:     req.Channel,
-			Recipient:   re,
-			Message:     req.Message,
-			Status:      dispatchStatusQueued,
-			MaxAttempts: dispatchMaxJobRetryAttempts,
-			CreatedAt:   createdAt,
+	for _, re := range bulkReq.Recipients {
+		singleReq := CreateDispatchRequest{
+			Channel:   bulkReq.Channel,
+			Recipient: re,
+			Message:   bulkReq.Message,
 		}
+
+		b, err := singleReq.Marshal()
+		if err != nil {
+			return nil, err
+		}
+
+		r := bytes.NewReader(b)
+		j, err := a.handleCreateJob(r)
+		if err != nil {
+			return nil, err
+		}
+
 		jobs = append(jobs, j)
 	}
-	a.jobs = append(a.jobs, jobs...)
-	a.mu.Unlock()
 
 	// send to queue
 	go func() {
@@ -327,20 +331,23 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, []DispatchJob)
 		}
 	}()
 
-	return nil, jobs
+	return jobs, nil
 }
 
-func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
+func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 	req := &CreateDispatchRequest{}
 	if err := json.NewDecoder(r).Decode(req); err != nil {
-		return err, DispatchJob{}
+		return DispatchJob{}, err
 	}
 
 	if err := req.validate(); err != nil {
-		return err, DispatchJob{}
+		return DispatchJob{}, err
 	}
 
-	jobID := a.getNewJobID()
+	jobID, err := a.getNewJobID()
+	if err != nil {
+		return DispatchJob{}, err
+	}
 	qk := getJobQueueKey(jobID)
 	j := DispatchJob{
 		ID:          jobID,
@@ -354,7 +361,7 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
 
 	b, err := j.Marshal()
 	if err != nil {
-		return err, DispatchJob{}
+		return DispatchJob{}, err
 	}
 	// json string
 	js := string(b)
@@ -363,16 +370,14 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
 	a.rdb.Set(ctx, qk, js, 0).Err()
 	cancel()
 	if err != nil {
-		return err, DispatchJob{}
+		return DispatchJob{}, err
 	}
-
-	a.jobs = append(a.jobs, j)
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	a.rdb.RPush(ctx2, redisListKey, jobID)
 	cancel2()
 
-	return nil, j
+	return j, nil
 }
 
 func rdbGetLastJobId(rdb *redis.Client) (uint32, error) {
@@ -380,12 +385,12 @@ func rdbGetLastJobId(rdb *redis.Client) (uint32, error) {
 	defer cancel()
 	val, err := rdb.Get(ctx, redisLastQueueKey).Result()
 	if err != nil {
-		return 0, fmt.Errorf("redis retrive %v:%v", redisLastQueueKey, err)
+		return 0, fmt.Errorf("redis retrieve %v:%v", redisLastQueueKey, err)
 	}
 
 	id, err := strconv.ParseUint(val, 10, 32)
 	if err != nil {
-		return 0, fmt.Errorf("onverting string to uint32 %v:%v", redisLastQueueKey, err)
+		return 0, fmt.Errorf("converting string to uint32 %v:%v", redisLastQueueKey, err)
 	}
 	return uint32(id), nil
 }
@@ -421,7 +426,7 @@ func (a *DispatcherAPI) Worker(ctx context.Context) {
 			res, err := a.rdb.BLPop(ctx, redisConnectionTimeout, redisListKey).Result()
 			cancel()
 			if err != nil {
-				a.logger.Error("redis BLPop", "error", ctx.Err())
+				//a.logger.Error("redis b", "error", ctx.Err())
 				continue
 			}
 			idString := res[1]
@@ -528,14 +533,16 @@ func (a *DispatcherAPI) writeJSON(w http.ResponseWriter, data any, statusCode in
 	}
 }
 
-func (a *DispatcherAPI) getNewJobID() uint32 {
-	a.lastKey.Add(1)
-	lk := a.getLastJobID()
-	return lk
-}
+func (a *DispatcherAPI) getNewJobID() (uint32, error) {
+	id := a.lastKey.Add(1)
 
-func (a *DispatcherAPI) getLastJobID() uint32 {
-	return a.lastKey.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+	defer cancel()
+	if err := a.rdb.Set(ctx, redisLastQueueKey, id, 0).Err(); err != nil {
+		return 0, err
+	}
+
+	return id, nil
 }
 
 func getJobQueueKey(id uint32) string {
