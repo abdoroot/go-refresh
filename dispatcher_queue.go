@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,14 +31,14 @@ const dispatchWorkerCount = 3
 const dispatchMaxJobRetryAttempts = 3
 
 const redisConnectionTimeout = time.Second * 2
-
 const redisListKey = "dispatch:queue"
+const redisLastQueueKey = "dispatch:last_queue_id"
 
 const channelWhatsapp = "whatsapp"
 const channelEmail = "email"
 
 type DispatchJob struct {
-	ID          int       `json:"id"`
+	ID          uint32    `json:"id"`
 	Channel     string    `json:"channel"`
 	Recipient   string    `json:"recipient"`
 	Message     string    `json:"message"`
@@ -45,6 +46,17 @@ type DispatchJob struct {
 	Attempts    int       `json:"attempts"`
 	MaxAttempts int       `json:"max_attempts"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+func (r DispatchJob) Marshal() ([]byte, error) {
+	return json.Marshal(r)
+}
+
+func (r *DispatchJob) UnMarshal(s string) error {
+	if err := json.Unmarshal([]byte(s), r); err != nil {
+		return err
+	}
+	return nil
 }
 
 type CreateDispatchRequest struct {
@@ -117,12 +129,13 @@ type dispatchResp struct {
 }
 
 type DispatcherAPI struct {
-	jobs   []DispatchJob
-	rdb    *redis.Client
-	mu     *sync.RWMutex
-	server *http.Server
-	logger *slog.Logger
-	wg     sync.WaitGroup
+	jobs    []DispatchJob
+	rdb     *redis.Client
+	mu      *sync.RWMutex
+	server  *http.Server
+	logger  *slog.Logger
+	lastKey *atomic.Uint32
+	wg      sync.WaitGroup
 }
 
 func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
@@ -140,13 +153,25 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 	})
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	lastKey := &atomic.Uint32{}
+
+	lastDBKey, err := rdbGetLastJobId(rdb)
+	if err != nil {
+		logger.Error("getting last job id from the queue", "err", err)
+	}
+
+	if lastDBKey != 0 {
+		lastKey.Add(lastDBKey)
+	}
+
 	return &DispatcherAPI{
-		jobs:   make([]DispatchJob, 0),
-		mu:     mu,
-		server: server,
-		logger: logger,
-		rdb:    rdb,
-		wg:     sync.WaitGroup{},
+		jobs:    make([]DispatchJob, 0),
+		mu:      mu,
+		server:  server,
+		logger:  logger,
+		rdb:     rdb,
+		lastKey: lastKey,
+		wg:      sync.WaitGroup{},
 	}
 }
 
@@ -192,15 +217,15 @@ func (a *DispatcherAPI) dispatchHandler(w http.ResponseWriter, r *http.Request) 
 			return
 		} else {
 			// Retrieve single job
-			idInt, err := strconv.Atoi(id)
+			idUint, err := strconv.ParseUint(id, 10, 32)
 			if err != nil {
 				a.logger.Error("invalid job id", "id", id)
 				a.writeJSON(w, dispatchResp{"invalid job id"}, http.StatusBadRequest)
 				return
 			}
 
-			ok, j := a.handleRetrieveJob(idInt)
-			if !ok {
+			j, err := a.handleRetrieveJob(uint32(idUint))
+			if err != nil {
 				a.writeJSON(w, dispatchResp{"job not found"}, http.StatusNotFound)
 				return
 			}
@@ -235,15 +260,22 @@ func (a *DispatcherAPI) bulkDispatchHandler(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (a *DispatcherAPI) handleRetrieveJob(id int) (bool, DispatchJob) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	for _, j := range a.jobs {
-		if j.ID == id {
-			return true, j
-		}
+func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+	defer cancel()
+
+	qk := getJobQueueKey(id)
+	js, err := a.rdb.Get(ctx, qk).Result()
+	if err != nil {
+		return DispatchJob{}, err
 	}
-	return false, DispatchJob{}
+
+	j := DispatchJob{}
+	if err := j.UnMarshal(js); err != nil {
+		return DispatchJob{}, err
+	}
+
+	return j, nil
 }
 
 func (a *DispatcherAPI) handleRetrieveJobs() []DispatchJob {
@@ -269,12 +301,9 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) (error, []DispatchJob)
 	a.mu.Lock()
 	jobs := []DispatchJob{}
 
-	jobID := a.getNewJobID()
 	createdAt := time.Now()
-	for i, re := range req.Recipients {
-		if i != 0 {
-			jobID++
-		}
+	for _, re := range req.Recipients {
+		jobID := a.getNewJobID()
 		j := DispatchJob{
 			ID:          jobID,
 			Channel:     req.Channel,
@@ -311,8 +340,8 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
 		return err, DispatchJob{}
 	}
 
-	a.mu.Lock()
 	jobID := a.getNewJobID()
+	qk := getJobQueueKey(jobID)
 	j := DispatchJob{
 		ID:          jobID,
 		Channel:     req.Channel,
@@ -322,14 +351,43 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (error, DispatchJob) {
 		MaxAttempts: dispatchMaxJobRetryAttempts,
 		CreatedAt:   time.Now(),
 	}
-	a.jobs = append(a.jobs, j)
-	a.mu.Unlock()
+
+	b, err := j.Marshal()
+	if err != nil {
+		return err, DispatchJob{}
+	}
+	// json string
+	js := string(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	defer cancel()
-	a.rdb.RPush(ctx, redisListKey, jobID)
+	a.rdb.Set(ctx, qk, js, 0).Err()
+	cancel()
+	if err != nil {
+		return err, DispatchJob{}
+	}
+
+	a.jobs = append(a.jobs, j)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), redisConnectionTimeout)
+	a.rdb.RPush(ctx2, redisListKey, jobID)
+	cancel2()
 
 	return nil, j
+}
+
+func rdbGetLastJobId(rdb *redis.Client) (uint32, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+	defer cancel()
+	val, err := rdb.Get(ctx, redisLastQueueKey).Result()
+	if err != nil {
+		return 0, fmt.Errorf("redis retrive %v:%v", redisLastQueueKey, err)
+	}
+
+	id, err := strconv.ParseUint(val, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("onverting string to uint32 %v:%v", redisLastQueueKey, err)
+	}
+	return uint32(id), nil
 }
 
 func (a *DispatcherAPI) handleShutdown(cancel context.CancelFunc, sigChan chan os.Signal) {
@@ -367,28 +425,27 @@ func (a *DispatcherAPI) Worker(ctx context.Context) {
 				continue
 			}
 			idString := res[1]
-			idInt, err := strconv.Atoi(idString)
+			idUint, err := strconv.ParseUint(idString, 10, 32)
 			if err != nil {
-				a.logger.Error("string to int", "str", idString)
+				a.logger.Error("string to uint32", "str", idString)
 				continue
 			}
-			a.simulateSend(idInt)
+			a.simulateSend(uint32(idUint))
 		}
 	}
 }
 
-func (a *DispatcherAPI) simulateSend(id int) {
-	ok := a.updateDispatchJobStatus(id, dispatchStatusProcessing)
-	if !ok {
-		a.logger.Error("update dispatch job status", "status", dispatchStatusProcessing)
+func (a *DispatcherAPI) simulateSend(id uint32) {
+	if err := a.updateDispatchJobStatus(id, dispatchStatusProcessing); err != nil {
+		a.logger.Error("update dispatch job status", "status", dispatchStatusProcessing, "err", err)
 		return
 	}
 
 	a.logger.Info("processing dispatch job", "id", id)
 	<-time.After(time.Second * 2)
 
-	ok, j := a.handleRetrieveJob(id)
-	if !ok {
+	j, err := a.handleRetrieveJob(id)
+	if err != nil {
 		a.logger.Error("dispatch job not found", "id", id)
 		return
 	}
@@ -399,57 +456,64 @@ func (a *DispatcherAPI) simulateSend(id int) {
 		return
 	}
 
-	ok = a.updateDispatchJobStatus(id, dispatchStatusSent)
-	if !ok {
-		a.logger.Error("update dispatch job status", "status", dispatchStatusSent)
+	if err := a.updateDispatchJobStatus(id, dispatchStatusSent); err != nil {
+		a.logger.Error("update dispatch job status", "status", dispatchStatusSent, "err", err)
 		return
 	}
 
 	a.logger.Info("dispatch job sent", "id", id)
 }
 
-func (a *DispatcherAPI) processFailedDispatchJob(id int) {
-	a.mu.RLock()
-	jobIndex, ok := a.getJobIndex(id)
-	if !ok {
-		a.mu.RUnlock()
-		a.logger.Error("failed dispatch job not found", "id", id)
+func (a *DispatcherAPI) processFailedDispatchJob(id uint32) {
+	j, err := a.handleRetrieveJob(id)
+	if err != nil {
+		a.logger.Error("dispatch job not found", "id", id)
 		return
 	}
-	j := a.jobs[jobIndex]
-	a.mu.RUnlock()
 
 	if j.Attempts < j.MaxAttempts {
-		ok = a.updateDispatchJobStatus(id, dispatchStatusQueued)
-		if ok {
-			go func() {
-				<-time.After(time.Second)
-				ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-				defer cancel()
-				a.rdb.RPush(ctx, redisListKey, id)
-			}()
+		if err := a.updateDispatchJobStatus(id, dispatchStatusQueued); err != nil {
+			a.logger.Error("update dispatch job status", "status", dispatchStatusQueued, "err", err)
+			return
 		}
+		go func() {
+			<-time.After(time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+			defer cancel()
+			a.rdb.RPush(ctx, redisListKey, id)
+		}()
 		return
 	}
 
-	a.updateDispatchJobStatus(id, dispatchStatusFailed)
+	if err := a.updateDispatchJobStatus(id, dispatchStatusFailed); err != nil {
+		a.logger.Error("update dispatch job status", "status", dispatchStatusFailed, "err", err)
+		return
+	}
 	a.logger.Error("dispatch job failed permanently", "status", dispatchStatusFailed)
 }
 
-func (a *DispatcherAPI) updateDispatchJobStatus(id int, status string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	for k, j := range a.jobs {
-		if j.ID == id {
-			a.jobs[k].Status = status
-			if status == dispatchStatusProcessing {
-				a.jobs[k].Attempts++
-			}
-			return true
-		}
+func (a *DispatcherAPI) updateDispatchJobStatus(id uint32, status string) error {
+	j, err := a.handleRetrieveJob(id)
+	if err != nil {
+		return err
 	}
-	return false
+
+	j.Status = status
+	if status == dispatchStatusProcessing {
+		j.Attempts++
+	}
+
+	b, err := j.Marshal()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
+	defer cancel()
+	if err := a.rdb.Set(ctx, getJobQueueKey(id), string(b), 0).Err(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (a *DispatcherAPI) shouldFailFirst(j DispatchJob) bool {
@@ -464,17 +528,18 @@ func (a *DispatcherAPI) writeJSON(w http.ResponseWriter, data any, statusCode in
 	}
 }
 
-func (a *DispatcherAPI) getNewJobID() int {
-	return len(a.jobs) + 1
+func (a *DispatcherAPI) getNewJobID() uint32 {
+	a.lastKey.Add(1)
+	lk := a.getLastJobID()
+	return lk
 }
 
-func (a *DispatcherAPI) getJobIndex(id int) (int, bool) {
-	for k, job := range a.jobs {
-		if job.ID == id {
-			return k, true
-		}
-	}
-	return 0, false
+func (a *DispatcherAPI) getLastJobID() uint32 {
+	return a.lastKey.Add(1)
+}
+
+func getJobQueueKey(id uint32) string {
+	return fmt.Sprintf("%v:%v", redisListKey, id)
 }
 
 func isEmailValid(email string) bool {
