@@ -1,0 +1,1 @@
+DROP TABLE dispatch_jobs;

@@ -1,4 +1,4 @@
-package main
+package dispatch
 
 import (
 	"bytes"
@@ -13,10 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/abdoroot/go-refresh/internal/config"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -27,7 +27,6 @@ const (
 	dispatchStatusFailed     = "failed"
 
 	redisQueueKey     = "dispatch:queue"
-	redisJobKey       = "dispatch:job"
 	redisLastQueueKey = "dispatch:last_id"
 )
 
@@ -162,17 +161,19 @@ type dispatchResp struct {
 }
 
 type DispatcherAPI struct {
-	rdb     *redis.Client
-	server  *http.Server
-	router  *http.ServeMux
-	logger  *slog.Logger
-	lastKey *atomic.Uint32
-	wg      sync.WaitGroup
+	rdb    *redis.Client
+	store  Repository
+	server *http.Server
+	router *http.ServeMux
+	logger *slog.Logger
+	wg     sync.WaitGroup
+	mu     sync.RWMutex
 }
 
-func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
-	if !strings.HasPrefix(addr, ":") {
-		addr = fmt.Sprintf(":%v", addr)
+func NewDispatcherAPI(config config.Config, store Repository) *DispatcherAPI {
+	var addr string
+	if !strings.HasPrefix(config.ServerPort, ":") {
+		addr = fmt.Sprintf(":%v", config.ServerPort)
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -186,31 +187,19 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 	}
 
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisHost,
+		Addr:     config.RedisHost,
 		Password: "",
 		DB:       0,
 	})
 
-	lastKey := &atomic.Uint32{}
-
-	lastDBKey, err := rdbGetLastJobId(rdb)
-	if err != nil {
-		logger.Error("getting last job id from the queue", "err", err)
-	}
-
-	logger.Info("last job id from the queue", "id", lastDBKey)
-
-	if lastDBKey != 0 {
-		lastKey.Add(lastDBKey)
-	}
-
 	return &DispatcherAPI{
-		server:  server,
-		router:  router,
-		logger:  logger,
-		rdb:     rdb,
-		lastKey: lastKey,
-		wg:      sync.WaitGroup{},
+		logger: logger,
+		store:  store,
+		router: router,
+		server: server,
+		rdb:    rdb,
+		wg:     sync.WaitGroup{},
+		mu:     sync.RWMutex{},
 	}
 }
 
@@ -301,41 +290,21 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
 
-	qk := getJobKey(id)
-	fields, err := a.rdb.HGetAll(ctx, qk).Result()
+	job, err := a.store.GetJob(ctx, id)
 	if err != nil {
 		return DispatchJob{}, err
 	}
-	if len(fields) == 0 {
-		return DispatchJob{}, fmt.Errorf("job %d not found", id)
-	}
 
-	return mapToDispatchJob(fields)
+	return job, nil
 }
 
 func (a *DispatcherAPI) handleRetrieveJobs() ([]DispatchJob, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	jobs := []DispatchJob{}
-	r := fmt.Sprintf("%v:*", redisJobKey)
-	iter := a.rdb.Scan(ctx, 0, r, 0).Iterator()
-
-	for iter.Next(ctx) {
-		key := iter.Val()
-		idString := strings.TrimPrefix(key, fmt.Sprintf("%v:", redisJobKey))
-		id, err := strconv.ParseUint(idString, 10, 32)
-		if err != nil {
-			return nil, err
-		}
-
-		idInt32 := uint32(id)
-		job, err := a.handleRetrieveJob(idInt32)
-		if err != nil {
-			return nil, err
-		}
-
-		jobs = append(jobs, job)
+	jobs, err := a.store.ListJobs(ctx)
+	if  err != nil {
+		return []DispatchJob{}, err
 	}
 
 	return jobs, nil
@@ -387,13 +356,7 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 		return DispatchJob{}, err
 	}
 
-	jobID, err := a.getNewJobID()
-	if err != nil {
-		return DispatchJob{}, err
-	}
-
 	job := DispatchJob{
-		ID:          jobID,
 		Channel:     req.Channel,
 		Recipient:   req.Recipient,
 		Message:     req.Message,
@@ -402,44 +365,25 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 		CreatedAt:   time.Now(),
 	}
 
-	// save the job
-	qk := getJobKey(jobID)
-	m, err := job.ToMap()
-	if err != nil {
-		return DispatchJob{}, err
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	err = a.rdb.HSet(ctx, qk, m).Err()
-	cancel()
+	defer cancel()
+
+	id, err := a.store.CreateJob(ctx, job)
 	if err != nil {
 		return DispatchJob{}, err
 	}
 
 	// push the job to queue
 	ctx2, cancel2 := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	err = a.rdb.RPush(ctx2, redisQueueKey, jobID).Err()
+	err = a.rdb.RPush(ctx2, redisQueueKey, id).Err()
 	cancel2()
 	if err != nil {
 		return DispatchJob{}, err
 	}
 
+	job.ID = id
+
 	return job, nil
-}
-
-func rdbGetLastJobId(rdb *redis.Client) (uint32, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	defer cancel()
-	val, err := rdb.Get(ctx, redisLastQueueKey).Result()
-	if err != nil {
-		return 0, fmt.Errorf("redis retrieve %v:%v", redisLastQueueKey, err)
-	}
-
-	id, err := strconv.ParseUint(val, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("converting string to uint32 %v:%v", redisLastQueueKey, err)
-	}
-	return uint32(id), nil
 }
 
 func (a *DispatcherAPI) handleShutdown(cancel context.CancelFunc, sigChan chan os.Signal) {
@@ -552,38 +496,10 @@ func (a *DispatcherAPI) updateDispatchJobStatus(id uint32, status string) error 
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 	defer cancel()
 
-	key := getJobKey(id)
-	var lastErr error
-	for range redisTransactionMaxAttempts {
-		err := a.rdb.Watch(ctx, func(tx *redis.Tx) error {
-			exists, err := tx.Exists(ctx, key).Result()
-			if err != nil {
-				return err
-			}
-			if exists == 0 {
-				return fmt.Errorf("job %d not found", id)
-			}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 
-			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-				if status == dispatchStatusProcessing {
-					pipe.HIncrBy(ctx, key, "attempts", 1)
-				}
-				pipe.HSet(ctx, key, "status", status)
-				return nil
-			})
-			return err
-		}, key)
-		if err == redis.TxFailedErr {
-			lastErr = err
-			continue
-		}
-		return err
-	}
-
-	if lastErr != nil {
-		return fmt.Errorf("update dispatch job status after %d attempts: %w", redisTransactionMaxAttempts, lastErr)
-	}
-	return nil
+	return a.store.UpdateJobStatus(ctx, id, status, 1)
 }
 
 func (a *DispatcherAPI) shouldFailFirst(j DispatchJob) bool {
@@ -598,54 +514,6 @@ func (a *DispatcherAPI) writeJSON(w http.ResponseWriter, data any, statusCode in
 	}
 }
 
-func (a *DispatcherAPI) getNewJobID() (uint32, error) {
-	id := a.lastKey.Add(1)
-
-	ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	defer cancel()
-	if err := a.rdb.Set(ctx, redisLastQueueKey, id, 0).Err(); err != nil {
-		return 0, err
-	}
-
-	return id, nil
-}
-
-func getJobKey(id uint32) string {
-	return fmt.Sprintf("%v:%v", redisJobKey, id)
-}
-
-func mapToDispatchJob(fields map[string]string) (DispatchJob, error) {
-	id, err := strconv.ParseUint(fields["id"], 10, 32)
-	if err != nil {
-		return DispatchJob{}, fmt.Errorf("parsing job id: %w", err)
-	}
-
-	attempts, err := strconv.Atoi(fields["attempts"])
-	if err != nil {
-		return DispatchJob{}, fmt.Errorf("parsing job attempts: %w", err)
-	}
-
-	maxAttempts, err := strconv.Atoi(fields["max_attempts"])
-	if err != nil {
-		return DispatchJob{}, fmt.Errorf("parsing job max attempts: %w", err)
-	}
-
-	createdAt, err := time.Parse(time.RFC3339Nano, fields["created_at"])
-	if err != nil {
-		return DispatchJob{}, fmt.Errorf("parsing job created at: %w", err)
-	}
-
-	return DispatchJob{
-		ID:          uint32(id),
-		Channel:     fields["channel"],
-		Recipient:   fields["recipient"],
-		Message:     fields["message"],
-		Status:      fields["status"],
-		Attempts:    attempts,
-		MaxAttempts: maxAttempts,
-		CreatedAt:   createdAt,
-	}, nil
-}
 
 func isEmailValid(email string) bool {
 	return strings.Contains(email, "@")

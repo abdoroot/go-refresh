@@ -1,4 +1,4 @@
-package main
+package dispatch
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/redis/go-redis/v9"
@@ -54,25 +53,8 @@ func newTestDispatcher(process func(context.Context, redis.Cmder) error) *Dispat
 	rdb.AddHook(redisCommandHook{process: process})
 
 	return &DispatcherAPI{
-		rdb:     rdb,
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		lastKey: &atomic.Uint32{},
-	}
-}
-
-func TestGetNewJobIDReturnsRedisError(t *testing.T) {
-	redisErr := errors.New("redis set failed")
-	api := newTestDispatcher(func(ctx context.Context, cmd redis.Cmder) error {
-		if strings.EqualFold(cmd.Name(), "set") {
-			cmd.SetErr(redisErr)
-			return redisErr
-		}
-		return nil
-	})
-
-	_, err := api.getNewJobID()
-	if !errors.Is(err, redisErr) {
-		t.Fatalf("expected redis error, got %v", err)
+		rdb:    rdb,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
