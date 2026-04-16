@@ -21,7 +21,7 @@ func main() {
 
 	api := NewDispatcherAPI(srvPort, redisHost)
 
-	if err := api.Serve(); err != nil && err != http.ErrServerClosed {
+	if err := api.Run(); err != nil && err != http.ErrServerClosed {
 		slog.Error("error starting api server at", "port", srvPort)
 	}
 }

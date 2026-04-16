@@ -44,6 +44,15 @@ const (
 	channelEmail    = "email"
 )
 
+type Middleware func(http.Handler) http.Handler
+
+func loggingMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("New reqquest", "method", r.Method, "path", r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
+}
+
 type DispatchJob struct {
 	ID          uint32    `json:"id" redis:"id"`
 	Channel     string    `json:"channel" redis:"channel"`
@@ -155,6 +164,7 @@ type dispatchResp struct {
 type DispatcherAPI struct {
 	rdb     *redis.Client
 	server  *http.Server
+	router  *http.ServeMux
 	logger  *slog.Logger
 	lastKey *atomic.Uint32
 	wg      sync.WaitGroup
@@ -165,7 +175,15 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 		addr = fmt.Sprintf(":%v", addr)
 	}
 
-	server := &http.Server{Addr: addr}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	router := http.NewServeMux()
+	handler := loggingMiddleware(router, logger)
+
+	server := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+	}
 
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     redisHost,
@@ -173,7 +191,6 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 		DB:       0,
 	})
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	lastKey := &atomic.Uint32{}
 
 	lastDBKey, err := rdbGetLastJobId(rdb)
@@ -189,6 +206,7 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 
 	return &DispatcherAPI{
 		server:  server,
+		router:  router,
 		logger:  logger,
 		rdb:     rdb,
 		lastKey: lastKey,
@@ -196,7 +214,7 @@ func NewDispatcherAPI(addr, redisHost string) *DispatcherAPI {
 	}
 }
 
-func (a *DispatcherAPI) Serve() error {
+func (a *DispatcherAPI) Run() error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -215,75 +233,68 @@ func (a *DispatcherAPI) Serve() error {
 		}
 	}
 
-	http.HandleFunc("/dispatch", a.dispatchHandler)
-	http.HandleFunc("/dispatch/bulk", a.bulkDispatchHandler)
+	a.router.HandleFunc("GET /dispatch/{id}", a.HandelGetSingleDispatch)
+	a.router.HandleFunc("GET /dispatch", a.HandelGetAllSingleDispatch)
+	a.router.HandleFunc("POST /dispatch", a.HandelCreateDispatch)
+	a.router.HandleFunc("POST /dispatch/bulk", a.bulkDispatchHandler)
 	return a.server.ListenAndServe()
 }
 
-func (a *DispatcherAPI) dispatchHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		j, err := a.handleCreateJob(r.Body)
-		if err != nil {
-			a.logger.Error("job creation", "error", err)
-			a.writeJSON(w, dispatchResp{"bad request"}, http.StatusBadRequest)
-			return
-		}
-		a.writeJSON(w, j, http.StatusCreated)
-	} else if r.Method == http.MethodGet {
-		id := r.URL.Query().Get("id")
-		if id == "" {
-			// Retrieve all jobs
-			js, err := a.handleRetrieveJobs()
-			if err != nil {
-				a.logger.Error("retrieve dispatch jobs", "error", err)
-				a.writeJSON(w, dispatchResp{"internal error"}, http.StatusInternalServerError)
-				return
-			}
-			a.writeJSON(w, js, http.StatusOK)
-			return
-		} else {
-			// Retrieve single job
-			idUint, err := strconv.ParseUint(id, 10, 32)
-			if err != nil {
-				a.logger.Error("invalid job id", "id", id)
-				a.writeJSON(w, dispatchResp{"invalid job id"}, http.StatusBadRequest)
-				return
-			}
-
-			j, err := a.handleRetrieveJob(uint32(idUint))
-			if err != nil {
-				a.writeJSON(w, dispatchResp{"job not found"}, http.StatusNotFound)
-				return
-			}
-
-			a.writeJSON(w, j, http.StatusOK)
-		}
-
-	} else {
-		a.writeJSON(w, dispatchResp{"method not allowed"}, http.StatusMethodNotAllowed)
+func (a *DispatcherAPI) HandelGetSingleDispatch(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	idUint, err := strconv.ParseUint(id, 10, 32)
+	if err != nil {
+		a.logger.Error("invalid job id", "id", id)
+		a.writeJSON(w, dispatchResp{"invalid job id"}, http.StatusBadRequest)
+		return
 	}
+
+	j, err := a.handleRetrieveJob(uint32(idUint))
+	if err != nil {
+		a.writeJSON(w, dispatchResp{"job not found"}, http.StatusNotFound)
+		return
+	}
+
+	a.writeJSON(w, j, http.StatusOK)
+
+}
+
+func (a *DispatcherAPI) HandelGetAllSingleDispatch(w http.ResponseWriter, r *http.Request) {
+	js, err := a.handleRetrieveJobs()
+	if err != nil {
+		a.logger.Error("retrieve dispatch jobs", "error", err)
+		a.writeJSON(w, dispatchResp{"internal error"}, http.StatusInternalServerError)
+		return
+	}
+	a.writeJSON(w, js, http.StatusOK)
+	return
+}
+func (a *DispatcherAPI) HandelCreateDispatch(w http.ResponseWriter, r *http.Request) {
+	j, err := a.handleCreateJob(r.Body)
+	if err != nil {
+		a.logger.Error("job creation", "error", err)
+		a.writeJSON(w, dispatchResp{"bad request - single"}, http.StatusBadRequest)
+		return
+	}
+	a.writeJSON(w, j, http.StatusCreated)
 }
 
 func (a *DispatcherAPI) bulkDispatchHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		jobs, err := a.handleCreateBulkJobs(r.Body)
-		if err != nil {
-			a.logger.Error("bulk job creation", "error", err)
-			a.writeJSON(w, dispatchResp{"bad request"}, http.StatusBadRequest)
-			return
-		}
-		a.writeJSON(w,
-			struct {
-				Count int           `json:"count"`
-				Jobs  []DispatchJob `json:"jobs"`
-			}{
-				Count: len(jobs),
-				Jobs:  jobs,
-			},
-			http.StatusCreated)
-	} else {
-		a.writeJSON(w, dispatchResp{"method not allowed"}, http.StatusMethodNotAllowed)
+	jobs, err := a.handleCreateBulkJobs(r.Body)
+	if err != nil {
+		a.logger.Error("bulk job creation", "error", err)
+		a.writeJSON(w, dispatchResp{"bad request"}, http.StatusBadRequest)
+		return
 	}
+	a.writeJSON(w,
+		struct {
+			Count int           `json:"count"`
+			Jobs  []DispatchJob `json:"jobs"`
+		}{
+			Count: len(jobs),
+			Jobs:  jobs,
+		},
+		http.StatusCreated)
 }
 
 func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
