@@ -22,7 +22,7 @@ func main() {
 	}
 
 	config := config.Load()
-	postgresConn, err := getPostgresConn(config)
+	postgresConn, err := createPostgresConn(config)
 	if err != nil {
 		slog.Error("error getting potgres connection", "port", config.RedisHost)
 		return
@@ -36,7 +36,7 @@ func main() {
 	}
 }
 
-func getPostgresConn(config config.Config) (*pgx.Conn, error) {
+func createPostgresConn(config config.Config) (*pgx.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DB_CONN_TIMEOUT)
 	defer cancel()
 
