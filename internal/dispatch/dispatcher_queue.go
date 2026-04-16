@@ -321,7 +321,6 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) ([]DispatchJob, error)
 	}
 
 	jobs := []DispatchJob{}
-
 	for _, re := range bulkReq.Recipients {
 		singleReq := CreateDispatchRequest{
 			Channel:   bulkReq.Channel,
@@ -334,6 +333,7 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) ([]DispatchJob, error)
 			return nil, err
 		}
 
+		//todo use conncurany
 		r := bytes.NewReader(b)
 		j, err := a.handleCreateJob(r)
 		if err != nil {
