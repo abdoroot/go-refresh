@@ -6,14 +6,14 @@ import (
 	"time"
 
 	"github.com/abdoroot/go-refresh/internal/dispatch"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Dispatcher struct {
-	conn *pgx.Conn
+	conn *pgxpool.Pool
 }
 
-func NewDispatcherRepo(conn *pgx.Conn) *Dispatcher {
+func NewDispatcherRepo(conn *pgxpool.Pool) *Dispatcher {
 	return &Dispatcher{
 		conn: conn,
 	}
@@ -73,16 +73,18 @@ func (r *Dispatcher) GetJob(ctx context.Context, id uint32) (dispatch.DispatchJo
 	return job, nil
 }
 
-func (r *Dispatcher) ListJobs(ctx context.Context) ([]dispatch.DispatchJob, error) {
+func (r *Dispatcher) ListJobs(ctx context.Context, limit, offset int) ([]dispatch.DispatchJob, error) {
 	query := `
 		SELECT id, channel, recipient, message, status,
 		       attempts, max_attempts, created_at
 		FROM dispatch_jobs
+		ORDER BY id DESC
+		LIMIT $1 OFFSET $2
 	`
 
 	jobs := []dispatch.DispatchJob{}
 
-	rows, err := r.conn.Query(ctx, query)
+	rows, err := r.conn.Query(ctx, query, limit, offset)
 	if err != nil {
 		return jobs, err
 	}

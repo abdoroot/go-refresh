@@ -43,6 +43,12 @@ const (
 	channelEmail    = "email"
 )
 
+const (
+	defaultListPage  = 1
+	defaultListLimit = 20
+	maxListLimit     = 100
+)
+
 type Middleware func(http.Handler) http.Handler
 
 func loggingMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
@@ -219,7 +225,13 @@ func (a *DispatcherAPI) HandleGetSingleDispatch(w http.ResponseWriter, r *http.R
 }
 
 func (a *DispatcherAPI) HandleGetAllSingleDispatch(w http.ResponseWriter, r *http.Request) {
-	js, err := a.handleRetrieveJobs()
+	page, limit, err := parsePagination(r)
+	if err != nil {
+		a.writeJSON(w, dispatchResp{"invalid page or limit"}, http.StatusBadRequest)
+		return
+	}
+
+	js, err := a.handleRetrieveJobs(page, limit)
 	if err != nil {
 		a.logger.Error("retrieve dispatch jobs", "error", err)
 		a.writeJSON(w, dispatchResp{"internal error"}, http.StatusInternalServerError)
@@ -268,16 +280,39 @@ func (a *DispatcherAPI) handleRetrieveJob(id uint32) (DispatchJob, error) {
 	return job, nil
 }
 
-func (a *DispatcherAPI) handleRetrieveJobs() ([]DispatchJob, error) {
+func (a *DispatcherAPI) handleRetrieveJobs(page, limit int) ([]DispatchJob, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	jobs, err := a.store.ListJobs(ctx)
+	offset := (page - 1) * limit
+	jobs, err := a.store.ListJobs(ctx, limit, offset)
 	if err != nil {
 		return []DispatchJob{}, err
 	}
 
 	return jobs, nil
+}
+
+func parsePagination(r *http.Request) (int, int, error) {
+	page := defaultListPage
+	if p := r.URL.Query().Get("page"); p != "" {
+		parsedPage, err := strconv.Atoi(p)
+		if err != nil || parsedPage < 1 {
+			return 0, 0, fmt.Errorf("invalid page: %q", p)
+		}
+		page = parsedPage
+	}
+
+	limit := defaultListLimit
+	if l := r.URL.Query().Get("limit"); l != "" {
+		parsedLimit, err := strconv.Atoi(l)
+		if err != nil || parsedLimit < 1 || parsedLimit > maxListLimit {
+			return 0, 0, fmt.Errorf("invalid limit: %q", l)
+		}
+		limit = parsedLimit
+	}
+
+	return page, limit, nil
 }
 
 func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) ([]DispatchJob, error) {

@@ -9,7 +9,7 @@ import (
 	"github.com/abdoroot/go-refresh/internal/config"
 	"github.com/abdoroot/go-refresh/internal/dispatch"
 	"github.com/abdoroot/go-refresh/internal/storage"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 )
@@ -45,16 +45,16 @@ func main() {
 	}
 }
 
-func createPostgresConn(config config.Config) (*pgx.Conn, error) {
+func createPostgresConn(config config.Config) (*pgxpool.Pool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DB_CONN_TIMEOUT)
 	defer cancel()
 
-	conn, err := pgx.Connect(ctx, config.DatabaseURL)
+	pool, err := pgxpool.New(ctx, config.DatabaseURL)
 	if err != nil {
-		return conn, err
+		return nil, err
 	}
 
-	return conn, nil
+	return pool, nil
 }
 
 func createRedisClient(config config.Config) (*redis.Client, error) {
