@@ -47,7 +47,7 @@ type Middleware func(http.Handler) http.Handler
 
 func loggingMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logger.Info("New reqquest", "method", r.Method, "path", r.URL.Path)
+		logger.Info("New request", "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -192,14 +192,14 @@ func (a *DispatcherAPI) Run() error {
 		}
 	}
 
-	a.router.HandleFunc("GET /dispatch/{id}", a.HandelGetSingleDispatch)
-	a.router.HandleFunc("GET /dispatch", a.HandelGetAllSingleDispatch)
-	a.router.HandleFunc("POST /dispatch", a.HandelCreateDispatch)
+	a.router.HandleFunc("GET /dispatch/{id}", a.HandleGetSingleDispatch)
+	a.router.HandleFunc("GET /dispatch", a.HandleGetAllSingleDispatch)
+	a.router.HandleFunc("POST /dispatch", a.HandleCreateDispatch)
 	a.router.HandleFunc("POST /dispatch/bulk", a.bulkDispatchHandler)
 	return a.server.ListenAndServe()
 }
 
-func (a *DispatcherAPI) HandelGetSingleDispatch(w http.ResponseWriter, r *http.Request) {
+func (a *DispatcherAPI) HandleGetSingleDispatch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	idUint, err := strconv.ParseUint(id, 10, 32)
 	if err != nil {
@@ -218,7 +218,7 @@ func (a *DispatcherAPI) HandelGetSingleDispatch(w http.ResponseWriter, r *http.R
 
 }
 
-func (a *DispatcherAPI) HandelGetAllSingleDispatch(w http.ResponseWriter, r *http.Request) {
+func (a *DispatcherAPI) HandleGetAllSingleDispatch(w http.ResponseWriter, r *http.Request) {
 	js, err := a.handleRetrieveJobs()
 	if err != nil {
 		a.logger.Error("retrieve dispatch jobs", "error", err)
@@ -228,7 +228,7 @@ func (a *DispatcherAPI) HandelGetAllSingleDispatch(w http.ResponseWriter, r *htt
 	a.writeJSON(w, js, http.StatusOK)
 	return
 }
-func (a *DispatcherAPI) HandelCreateDispatch(w http.ResponseWriter, r *http.Request) {
+func (a *DispatcherAPI) HandleCreateDispatch(w http.ResponseWriter, r *http.Request) {
 	j, err := a.handleCreateJob(r.Body)
 	if err != nil {
 		a.logger.Error("job creation", "error", err)
@@ -303,7 +303,7 @@ func (a *DispatcherAPI) handleCreateBulkJobs(r io.Reader) ([]DispatchJob, error)
 			return nil, err
 		}
 
-		//todo use conncurany
+		// TODO: use concurrency.
 		r := bytes.NewReader(b)
 		j, err := a.handleCreateJob(r)
 		if err != nil {

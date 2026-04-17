@@ -25,7 +25,7 @@ func main() {
 	config := config.Load()
 	postgresConn, err := createPostgresConn(config)
 	if err != nil {
-		slog.Error("error getting potgres connection", "port", config.ServerPort)
+		slog.Error("error getting postgres connection", "port", config.ServerPort)
 		return
 	}
 	DispatcherRepo := storage.NewDispatcherRepo(postgresConn)
@@ -36,7 +36,7 @@ func main() {
 		return
 	}
 
-	cacheStore := storage.NewRedisStrorage(c)
+	cacheStore := storage.NewRedisStorage(c)
 
 	api := dispatch.NewDispatcherAPI(config, DispatcherRepo, cacheStore)
 

@@ -14,7 +14,7 @@ type RedisStorage struct {
 	client *redis.Client
 }
 
-func NewRedisStrorage(client *redis.Client) *RedisStorage {
+func NewRedisStorage(client *redis.Client) *RedisStorage {
 	return &RedisStorage{
 		client: client,
 	}
@@ -31,7 +31,7 @@ func (r *RedisStorage) Pop(ctx context.Context, key string) (uint32, error) {
 
 	idString := res[1]
 	id, err := strconv.ParseUint(idString, 10, 32)
-	
+
 	return uint32(id), nil
 }
 func (r *RedisStorage) Close() error {
