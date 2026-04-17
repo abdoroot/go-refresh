@@ -31,9 +31,15 @@ func (r *RedisStorage) Pop(ctx context.Context, key string) (uint32, error) {
 
 	idString := res[1]
 	id, err := strconv.ParseUint(idString, 10, 32)
+	if err != nil {
+		return 0, err
+	}
 
 	return uint32(id), nil
 }
 func (r *RedisStorage) Close() error {
-	return r.Close()
+	if r.client == nil {
+		return nil
+	}
+	return r.client.Close()
 }

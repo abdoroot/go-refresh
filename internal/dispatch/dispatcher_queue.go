@@ -153,7 +153,7 @@ type DispatcherAPI struct {
 }
 
 func NewDispatcherAPI(config config.Config, store Repository, cacheStore CacheRepo) *DispatcherAPI {
-	var addr string
+	addr := config.ServerPort
 	if !strings.HasPrefix(config.ServerPort, ":") {
 		addr = fmt.Sprintf(":%v", config.ServerPort)
 	}
