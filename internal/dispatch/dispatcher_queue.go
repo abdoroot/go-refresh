@@ -53,38 +53,14 @@ func loggingMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
 }
 
 type DispatchJob struct {
-	ID          uint32    `json:"id" redis:"id"`
-	Channel     string    `json:"channel" redis:"channel"`
-	Recipient   string    `json:"recipient" redis:"recipient"`
-	Message     string    `json:"message" redis:"message"`
-	Status      string    `json:"status" redis:"status"`
-	Attempts    int       `json:"attempts" redis:"attempts"`
-	MaxAttempts int       `json:"max_attempts" redis:"max_attempts"`
-	CreatedAt   time.Time `json:"created_at" redis:"created_at"`
-}
-
-func (r DispatchJob) ToMap() (map[string]any, error) {
-	return map[string]any{
-		"id":           r.ID,
-		"channel":      r.Channel,
-		"recipient":    r.Recipient,
-		"message":      r.Message,
-		"status":       r.Status,
-		"attempts":     r.Attempts,
-		"max_attempts": r.MaxAttempts,
-		"created_at":   r.CreatedAt.Format(time.RFC3339Nano),
-	}, nil
-}
-
-func (r DispatchJob) Marshal() ([]byte, error) {
-	return json.Marshal(r)
-}
-
-func (r *DispatchJob) Unmarshal(s string) error {
-	if err := json.Unmarshal([]byte(s), r); err != nil {
-		return err
-	}
-	return nil
+	ID          uint32    `json:"id"`
+	Channel     string    `json:"channel"`
+	Recipient   string    `json:"recipient"`
+	Message     string    `json:"message"`
+	Status      string    `json:"status"`
+	Attempts    int       `json:"attempts"`
+	MaxAttempts int       `json:"max_attempts" `
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type CreateDispatchRequest struct {
@@ -161,7 +137,7 @@ type dispatchResp struct {
 }
 
 type DispatcherAPI struct {
-	rdb    *redis.Client
+	cache  CacheRepo
 	store  Repository
 	server *http.Server
 	router *http.ServeMux
@@ -170,7 +146,7 @@ type DispatcherAPI struct {
 	mu     sync.RWMutex
 }
 
-func NewDispatcherAPI(config config.Config, store Repository) *DispatcherAPI {
+func NewDispatcherAPI(config config.Config, store Repository, cacheStore CacheRepo) *DispatcherAPI {
 	var addr string
 	if !strings.HasPrefix(config.ServerPort, ":") {
 		addr = fmt.Sprintf(":%v", config.ServerPort)
@@ -186,18 +162,12 @@ func NewDispatcherAPI(config config.Config, store Repository) *DispatcherAPI {
 		Handler: handler,
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     config.RedisHost,
-		Password: "",
-		DB:       0,
-	})
-
 	return &DispatcherAPI{
 		logger: logger,
 		store:  store,
 		router: router,
 		server: server,
-		rdb:    rdb,
+		cache:  cacheStore,
 		wg:     sync.WaitGroup{},
 		mu:     sync.RWMutex{},
 	}
@@ -303,7 +273,7 @@ func (a *DispatcherAPI) handleRetrieveJobs() ([]DispatchJob, error) {
 	defer cancel()
 
 	jobs, err := a.store.ListJobs(ctx)
-	if  err != nil {
+	if err != nil {
 		return []DispatchJob{}, err
 	}
 
@@ -375,7 +345,7 @@ func (a *DispatcherAPI) handleCreateJob(r io.Reader) (DispatchJob, error) {
 
 	// push the job to queue
 	ctx2, cancel2 := context.WithTimeout(context.Background(), redisConnectionTimeout)
-	err = a.rdb.RPush(ctx2, redisQueueKey, id).Err()
+	err = a.cache.Push(ctx2, redisQueueKey, id)
 	cancel2()
 	if err != nil {
 		return DispatchJob{}, err
@@ -398,7 +368,7 @@ func (a *DispatcherAPI) handleShutdown(cancel context.CancelFunc, sigChan chan o
 
 	a.wg.Wait()
 	// workers finish
-	if err := a.rdb.Close(); err != nil {
+	if err := a.cache.Close(); err != nil {
 		a.logger.Error("closing redis conn", "err", err)
 	}
 }
@@ -414,7 +384,7 @@ func (a *DispatcherAPI) Worker(ctx context.Context) {
 			return
 		default:
 			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
-			res, err := a.rdb.BLPop(ctx, redisConnectionTimeout, redisQueueKey).Result()
+			id, err := a.cache.Pop(ctx, redisQueueKey)
 			cancel()
 			if err != nil {
 				if err != redis.Nil {
@@ -422,13 +392,13 @@ func (a *DispatcherAPI) Worker(ctx context.Context) {
 				}
 				continue
 			}
-			idString := res[1]
-			idUint, err := strconv.ParseUint(idString, 10, 32)
-			if err != nil {
-				a.logger.Error("string to uint32", "str", idString)
-				continue
-			}
-			a.simulateSend(uint32(idUint))
+			//idString := res[1]
+			//idUint, err := strconv.ParseUint(idString, 10, 32)
+			// if err != nil {
+			// 	a.logger.Error("string to uint32", "str", idString)
+			// 	continue
+			// }
+			a.simulateSend(uint32(id))
 		}
 	}
 }
@@ -478,7 +448,7 @@ func (a *DispatcherAPI) processFailedDispatchJob(id uint32) {
 			<-time.After(time.Second)
 			ctx, cancel := context.WithTimeout(context.Background(), redisConnectionTimeout)
 			defer cancel()
-			if err := a.rdb.RPush(ctx, redisQueueKey, id).Err(); err != nil {
+			if err := a.cache.Push(ctx, redisQueueKey, id); err != nil {
 				a.logger.Error("redis RPush", "error", err, "id", id)
 			}
 		}()
@@ -513,7 +483,6 @@ func (a *DispatcherAPI) writeJSON(w http.ResponseWriter, data any, statusCode in
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }
-
 
 func isEmailValid(email string) bool {
 	return strings.Contains(email, "@")

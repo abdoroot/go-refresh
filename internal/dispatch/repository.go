@@ -8,3 +8,9 @@ type Repository interface {
 	ListJobs(ctx context.Context) ([]DispatchJob, error)
 	UpdateJobStatus(ctx context.Context, id uint32, status string, attempts int) error
 }
+
+type CacheRepo interface {
+	Push(ctx context.Context, key string, val any) error
+	Pop(ctx context.Context, key string) (uint32, error)
+	Close() error
+}
